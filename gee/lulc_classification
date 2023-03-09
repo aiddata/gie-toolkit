@@ -1,0 +1,340 @@
+
+//*******************************************
+// Land-use and Land-cover (LULC) mapping
+// Algorithm used: random forest
+// Study location: Virginia
+// Created by: Dr. Kunwar K. Singh
+// Organization: AidData, GRI, William & Mary
+//*******************************************
+
+
+// *******************************************
+// Area of interest
+// *******************************************
+var VAdistricts = ee.FeatureCollection('users/krishna/VAdistricts_v01');
+Map.centerObject(VAdistricts, 11);                                 // Area of interest (AOI) and zoom level
+Map.addLayer(VAdistricts, {color: 'green'}, 'VAdistricts', false);
+
+
+// *******************************************
+// Ground observations
+// *******************************************
+var groundObservations = ee.FeatureCollection([                    //combine class types into one
+  ee.Feature(forest,{'class':0}),
+  ee.Feature(farmland,{'class':1}),
+  ee.Feature(water,{'class':2}),
+  ee.Feature(built_up,{'class':3}),
+  ee.Feature(bareEarth,{'class':4}),
+  ee.Feature(grass,{'class':5}),
+]);
+
+
+// *******************************************
+// Visualize elements
+// *******************************************
+var palettes = require('users/gena/packages:palettes');            // Get a palette: a list of hex strings https://github.com/gee-community/ee-palettes
+var paletteNDVI = palettes.colorbrewer.RdYlGn[9];
+var paletteSlope = palettes.colorbrewer.Paired[9];
+
+var vizParams = {bands: ['red','green','blue'],  min: 0,  max: 0.5,  gamma: [0.95, 1.1, 1]};
+
+var landcover_pal = [
+  'darkgreen', //0 forest
+  'yellow', //1 farmland
+  'Blue', //2 water
+  'orange', //3 built_up
+  'grey', //4 bareEarth
+  'lightgreen', //5 grass
+  ];
+
+
+// *******************************************
+// Geospatial data
+// *******************************************
+var DEM = ee.Image('USGS/SRTMGL1_003');
+var DEM_clp = DEM.clip(VAdistricts)
+
+
+// *******************************************
+// Landsat 8 imagery
+// *******************************************
+var Landsat8Collection = ee.ImageCollection('LANDSAT/LC08/C01/T1_TOA')                                // Get scenes that overlap with AOI with <10% cloud cover
+                     .filterDate('2019-01-01','2019-12-31')
+                     .filter(ee.Filter.lte('CLOUD_COVER', 10))
+                     .filterBounds(VAdistricts)
+
+var Landsat8Collection_sub = Landsat8Collection.select(['B2','B3','B4','B5','B6','B7'])               // select subsat of image bands and rename them for easier reference
+                   .map(function(x){return x.rename(['blue','green','red','nir','swir1','swir2'])})   // loop over images in collection and rename the bands
+
+var Landsat8Collection_filtered = Landsat8Collection_sub.median()                                     // Get median value for each pixel, way to filter clouds and possible artefacts
+var Landsat8Collection_filtered_clp = Landsat8Collection_filtered.clip(VAdistricts, 9)                // clip the result to the outline of NL
+
+Map.addLayer(Landsat8Collection_filtered_clp, vizParams, 'true', true);                               // true/false are the show parameter
+Map.addLayer(Landsat8Collection_filtered_clp, {bands: ['nir','red','green'], max: 0.5}, 'false', false);
+
+
+// *******************************************
+// Elevation data and derived products
+// *******************************************
+Map.addLayer(DEM_clp, {min:1523, max:3087}, 'DEM clipped', false);
+
+var Slope = ee.Terrain.slope(DEM_clp);                                                                 // Slope
+Map.addLayer(Slope, {min: 0, max :89.99, palette: paletteSlope}, 'Slope', false);
+
+var Aspect = ee.Terrain.aspect(DEM_clp);                                                               // Aspect
+Map.addLayer(Aspect, {min: 0, max: 359.99}, 'Aspect', false);
+
+
+// *******************************************
+// Calculate vegetation index
+// *******************************************
+var NDVI = Landsat8Collection_filtered_clp.normalizedDifference (['nir','red']).rename("NDVI");        // NDVI (normalized difference vegetation index)
+Map.addLayer(NDVI, {min:0.0, max:1, palette:paletteNDVI},'NDVI', false);
+
+
+// *******************************************
+// Tasseled cap transformations
+// *******************************************
+var calculateTasseledCap = function (image){
+  var b = image.select("B2", "B3", "B4", "B5", "B6", "B7");
+  //Coefficients are only for Landsat 8 TOA
+    var brightness_coefficents= ee.Image([0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872])
+  var greenness_coefficents= ee.Image([-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608]);
+  var wetness_coefficents= ee.Image([0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559]);
+  var fourth_coefficents= ee.Image([-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773]);
+  var fifth_coefficents= ee.Image([-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085]);
+  var sixth_coefficents= ee.Image([0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252]);
+
+    var brightness = image.expression(
+            '(B * BRIGHTNESS)',
+            {
+                'B':b,
+                'BRIGHTNESS': brightness_coefficents
+                }
+            );
+  var greenness = image.expression(
+    '(B * GREENNESS)',
+            {
+                'B':b,
+                'GREENNESS': greenness_coefficents
+                }
+            );
+  var wetness = image.expression(
+    '(B * WETNESS)',
+            {
+                'B':b,
+                'WETNESS': wetness_coefficents
+                }
+            );
+  var fourth = image.expression(
+      '(B * FOURTH)',
+        {
+          'B':b,
+          'FOURTH': fourth_coefficents
+          }
+        );
+  var fifth = image.expression(
+      '(B * FIFTH)',
+        {
+          'B':b,
+          'FIFTH': fifth_coefficents
+          }
+        );
+  var sixth = image.expression(
+    '(B * SIXTH)',
+    {
+      'B':b,
+      'SIXTH': sixth_coefficents
+      }
+    );
+  brightness = brightness.reduce(ee.call("Reducer.sum"));
+    greenness = greenness.reduce(ee.call("Reducer.sum"));
+    wetness = wetness.reduce(ee.call("Reducer.sum"));
+    fourth = fourth.reduce(ee.call("Reducer.sum"));
+    fifth = fifth.reduce(ee.call("Reducer.sum"));
+  sixth = sixth.reduce(ee.call("Reducer.sum"));
+  var tasseled_cap = ee.Image(brightness).addBands(greenness).addBands(wetness)
+                             .addBands(fourth)
+                             .addBands(fifth)
+                             .addBands(sixth).rename('brightness','greenness','wetness','fourth','fifth','sixth')
+  return tasseled_cap;
+};
+
+var Landsat8Collection_tasseledCap = Landsat8Collection.map(calculateTasseledCap);
+var Landsat8Collection_tasseledCap_mos = Landsat8Collection_tasseledCap.mosaic()                       // reduce tasseled cap collection to an image so we can use .reduceRegion()
+var tasseledCap_clp = Landsat8Collection_tasseledCap_mos.clip(VAdistricts)
+
+Map.addLayer(tasseledCap_clp,{min: 0, max:1, bands:['brightness']},'brightness', false);
+Map.addLayer(tasseledCap_clp,{min: 0, max:1, bands:['greenness']},'greenness', false);
+Map.addLayer(tasseledCap_clp,{min: 0, max:1, bands:['wetness']},'wetness', false);
+
+
+// *******************************************
+// Combine imagery bands and derived products
+// *******************************************
+var predictors = Landsat8Collection_filtered_clp
+.addBands(Slope)
+.addBands(Aspect)
+.addBands(NDVI)
+.addBands(tasseledCap_clp);
+print(predictors, 'predictors')
+
+// *******************************************
+// Values for pixels in each training polygon
+// *******************************************
+var training = predictors.sampleRegions({
+  collection: groundObservations,                                    // Get the sample from the polygons FeatureCollection.
+  properties: ['class'],                                             // Keep this list of properties from the polygons.
+  scale: 30                                                          // Set the scale to get Landsat pixels in the polygons.
+});
+
+
+// *******************************************
+// Split training and testing points
+// *******************************************
+var sample = training.randomColumn('random');
+var split = 0.5;                                                     // 50% training, 50% testing
+var trainingSet = sample.filter(ee.Filter.lt('random', split));
+var testingSet = sample.filter(ee.Filter.gte('random',split));
+
+
+
+// *******************************************
+// Train RF classifier using 80% of data
+// *******************************************
+var trainedClassifier = ee.Classifier.smileRandomForest({
+  numberOfTrees:5,
+  seed:100})
+  .train({
+  features: trainingSet,
+  classProperty: 'class',
+  inputProperties: predictors.bandNames()
+});
+
+var classified = predictors.classify(trainedClassifier);              // Classify the input imagery.
+
+// *******************************************
+// Confusion matrix & accuracy - training
+// *******************************************
+var trainAccuracy = trainedClassifier.confusionMatrix();
+print('Training Confusion Matrix', trainAccuracy);                    //shows error matrix
+print('Training Overall Accuracy', trainAccuracy.accuracy());         //shows overall accuracy
+print('Training kappa', trainAccuracy.kappa());
+
+
+// *******************************************
+// Confusion matrix & accuracy - testing
+// *******************************************
+var test = testingSet.classify(trainedClassifier);
+var confusionMatrix = test.errorMatrix('class', 'classification');
+print('Testing Confusion Matrix: ', confusionMatrix);                 //shows confusion matrix
+print('Testing Overall accuracy: ', confusionMatrix.accuracy());      //shows overall accuracy
+
+print("Testing User's Accuracy", confusionMatrix.consumersAccuracy());
+print("Testing Producer's Accuracy", confusionMatrix.producersAccuracy());
+print("Testing kappa", confusionMatrix.kappa());                      //ballence dataset and see effect on kappa (try get 0.81+)
+
+var dict_featImportance = trainedClassifier.explain();
+print(dict_featImportance, 'Variable Importance');                    // Variable importance
+
+var importance = ee.Dictionary(dict_featImportance.get('importance'))
+var keys = importance.keys().sort(importance.values()).reverse()
+var values = importance.values(keys);
+var rows = keys.zip(values).map(function(list) {
+  return {c: ee.List(list).map(function(n) { return {v: n}; })}
+})
+
+var dataTable = {
+  cols: [{id: 'band', label: 'Band', type: 'string'},
+         {id: 'importance', label: 'Importance', type: 'number'}],
+  rows: rows
+};
+
+
+ee.Dictionary(dataTable).evaluate(function(result) {
+  var chartVI2 = ui.Chart(result)
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Random forest variable importance',
+    legend: {position: 'none'},
+    hAxis: {title: 'Predictors'},
+    vAxis: {title: 'Variable importance'}
+
+  });
+
+print(chartVI2, 'Relative importance');
+});
+
+
+
+// *******************************************
+// LULC color palette
+// *******************************************
+var classified = predictors.classify(trainedClassifier);                     // Applying the model
+Map.addLayer(classified, {min:0, max:5, palette:landcover_pal}, 'classified', true);
+
+print(classified);
+
+
+// ******************************************
+// Charts
+// ******************************************
+var classlab = ['forest','farmland','water','built_up','bareEarth', 'grass']; // set the display colors and names for the classes
+var classval = [0,1,2,3,4,5]
+var classcol = ['darkgreen','Yellow','blue','orange', 'grey', 'lightgreen']   // use hex RGB or html5 color names
+
+
+// *******************************************
+// Class area distribution
+// *******************************************
+var chart = ui.Chart.image.byClass({
+  image: ee.Image.pixelArea().multiply(1e-6)        // pixel area in km2
+            .addBands(classified.rename('Classification')),
+  classBand: 'Classification',
+  region: VAdistricts,
+  reducer: ee.Reducer.sum(),
+  scale: 30*30,
+  classLabels: classlab,
+})
+chart.setOptions({title:'Area per class',
+hAxis: {title: 'LULC class type', titleTextStyle: {italic: false, bold: true}},
+vAxis: {title: 'Area (km2)', titleTextStyle: {italic: false, bold: true}},
+colors: classcol}, 'ColumnChart')
+print(chart)
+
+
+// *******************************************
+// Class distribution
+// *******************************************
+var sepclass = ee.Image(ee.List(classval).iterate(
+  function(x,y){return ee.Image(y).addBands(classified.eq(ee.Image.constant(x)))},
+  ee.Image().select()))
+var chartlab = []; classval.forEach(function(val,i){chartlab.push(val+' '+classlab[i])});
+var chart = ui.Chart.image.byRegion({
+  image: sepclass.rename(chartlab),
+  regions: VAdistricts,
+  reducer: ee.Reducer.sum(),
+  scale: 30*30,
+  xProperty: 'NAMELSAD',                                                    // province/watershed/county name
+}).setChartType('ColumnChart').setOptions({colors: classcol,
+isStacked: 'percent',
+title:'Area distribution',
+hAxis: {title: 'Virginia districts', titleTextStyle: {italic: false, bold: true}},
+vAxis: {title: 'Area (%)', titleTextStyle: {italic: false, bold: true}}})
+print(chart)
+
+
+// *******************************************
+// Download mapped LULC, variable importance
+// *******************************************
+Export.image.toDrive({
+  image: classified,
+  description: 'LULC Virginia districts',
+  folder: 'earthengine',
+  fileFormat: 'GeoTIFF',
+  region: VAdistricts,
+  scale:30,
+  maxPixels: 1e12
+});
+
+// End

@@ -1,0 +1,196 @@
+//*******************************************
+// Time-series Normalized Difference Vegetation Index
+// Study location: Virginia
+// Created by: Dr. Kunwar K. Singh
+// Organization: AidData, GRI, William & Mary
+//*******************************************
+
+
+// https://code.earthengine.google.com/5d47e7ea3bbbd5a8fa2805ecc766d606
+
+
+// *******************************************
+// Study area
+// *******************************************
+var VAdistricts = ee.FeatureCollection('users/krishna/VAdistricts_v01');
+Map.centerObject(VAdistricts, 10);                                 // Area of interest (AOI) and zoom level
+Map.addLayer(VAdistricts, {color: 'green'}, 'VAdistricts', false);
+
+
+// *******************************************
+// Land conver plots
+// *******************************************
+var landCoverPlots = ee.FeatureCollection(plots)
+  .filter(ee.Filter.or(ee.Filter.eq('Name', 'forest-001'),
+                       ee.Filter.eq('Name', 'water-003'),
+                       ee.Filter.eq('Name', 'water-004'),
+                       ee.Filter.eq('Name', 'farm-001'),
+                       ee.Filter.eq('Name', 'grass-001')));
+print(landCoverPlots);
+Map.addLayer(landCoverPlots, {color: 'red'}, 'Land cover plots');
+
+// *******************************************
+// Visualize elements
+// *******************************************
+var palettes = require('users/gena/packages:palettes');            // Get a palette: a list of hex strings https://github.com/gee-community/ee-palettes
+var paletteNDVI = palettes.colorbrewer.RdYlGn[9];
+
+
+// *******************************************
+// Remotely sensed imagery
+// *******************************************
+var sImagery = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+  .filterDate('2019-01-01','2021-12-31')
+  .filterBounds(landCoverPlots)
+  .filterMetadata('CLOUDY_PIXEL_PERCENTAGE','less_than', 5);
+
+
+// *******************************************
+// Calculate NDVI
+// *******************************************
+var estimateNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4'])
+  .rename('ndvi');
+  return image.addBands(ndvi);
+};
+
+var sImagery_ndvi = sImagery.map(estimateNDVI);
+print(sImagery_ndvi, "sImagery_ndvi");
+print(sImagery_ndvi.size(), "count");                             // Number of elements
+
+var sImagery_ndvi_sub = sImagery_ndvi.select(['ndvi']);
+print(sImagery_ndvi_sub, "sImagery_ndvi_sub");
+
+Map.addLayer(sImagery_ndvi_sub, {min:0.0, max:1, palette:paletteNDVI}, 'sImagery_ndvi_sub', false);
+Map.addLayer(landCoverPlots);
+Map.centerObject(landCoverPlots, 12);
+
+
+// *******************************************
+// Extract NDVI value for each polygon
+// *******************************************
+var sImagery_ndvi_list = sImagery_ndvi_sub.toList(sImagery_ndvi_sub.size());
+print (sImagery_ndvi_list, 'sImagery_ndvi_list ' )
+
+var landCoverPlots_list = landCoverPlots.toList(landCoverPlots.size());
+var ndvi_values = landCoverPlots_list.map(function (feat) {
+  var ndvi_val = sImagery_ndvi_list.map(function (image) {
+  var stats = ee.Image(image).reduceRegion(
+    {reducer: ee.Reducer.mean(),
+     geometry: ee.Feature(feat).geometry()});
+     return [ee.Feature(feat).get('Name'), ee.Date(ee.Image(image).get('system:time_start')).format('yyyy-MM-dd'), stats.get('ndvi')];
+  });
+  return ndvi_val;
+}).flatten();
+
+print("ndvi_values", ndvi_values);
+
+var len = ndvi_values.size();
+var list = ee.List.sequence(0, len.subtract(1), 3);
+
+
+// *******************************************
+// Reorganize ndvi list
+// *******************************************
+var new_ndvi_values = list.map(function(ele){
+
+  var start = ee.Number(ele).int();
+  var end = ee.Number(ele).add(3).int();
+  var new_list = ee.List([]);
+  var element = ee.List(ndvi_values.slice(start, end));
+  new_list = new_list.add(element);
+  return new_list.get(0);
+
+});
+
+print (new_ndvi_values, 'new ndvi values');
+
+var ndviValue_table = ee.FeatureCollection(new_ndvi_values.map(function(el){
+  el = ee.List(el); // cast every element of the list
+
+  return ee.Feature(null, {
+    'Name': el.get(0),
+    'date_edit': el.get(1),
+    'mean': el.get(2)
+  });
+}));
+
+print(ndviValue_table, 'NDVI value table');
+
+
+// *******************************************
+// Define the style of the chart
+// *******************************************
+var chartStyle = {title: '',  lineWidth: 3,  colors: ['green'],  curveType: 'function',
+
+  vAxis: {title: 'NDVI values', gridlines: {count: 0}, titleTextStyle:
+  {italic: false, bold: true, fontName: 'Arial', fontSize: '20'},
+
+  },
+
+  hAxis: {title: 'Date', format: 'MM-yy', gridlines: {count: 12}, titleTextStyle:
+  {italic: false, bold: true, fontName: 'Arial',fontSize: '20'},
+
+  },
+
+}
+
+
+// *******************************************
+// Create charts
+// *******************************************
+var chart = ui.Chart.image.series({                //Generates a Chart from an ImageCollection. Plots derived values of each band in a region across images. Usually a time series.
+  imageCollection: sImagery_ndvi.select('ndvi'),
+  region: landCoverPlots,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+})
+
+chart.setOptions(chartStyle);
+print(chart);                                        // Display the chart in the console.
+
+
+
+// NDVI values over
+var tempTimeSeries = ui.Chart.image.seriesByRegion(    //Generates a Chart from an image collection. Extracts and plots the value of the specified band in each region for each image in the collection. Usually a time series.
+    sImagery_ndvi, landCoverPlots, ee.Reducer.mean(), 'ndvi', 10, 'system:time_start', 'Name')
+        .setChartType('ScatterChart')
+        .setOptions({
+          title: '',
+          vAxis: {title: 'NDVI values'},
+          hAxis: {title: 'Date', format: 'MM-yy', gridlines: {count: 20}},
+          lineWidth: 1,
+          pointSize: 2,
+          series: {0: {color: 'FF0000'},
+
+}});
+
+print(tempTimeSeries);                             // Display.
+
+
+// *******************************************
+// Create a time series chart.
+// *******************************************
+var plotNDVI = ui.Chart.image.seriesByRegion(
+  sImagery_ndvi, landCoverPlots, ee.Reducer.mean(), 'ndvi', 10, 'system:time_start', 'Mean of NDVI')
+              .setChartType('LineChart')
+              .setOptions({
+                title: '',
+                hAxis: {title: 'Date', format: 'MM-yy'},
+                vAxis: {title: 'NDVI'}
+});
+
+// Display.
+print(plotNDVI);
+
+
+// *******************************************
+// Export NDVI values in csv format.
+// *******************************************
+Export.table.toDrive(ndviValue_table,
+"ndvi", //my task
+"earthengine", //my export folder
+"ndvi-time-series",  //file name
+"CSV");
+
+// End
